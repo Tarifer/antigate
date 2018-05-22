@@ -1,10 +1,13 @@
 require "antigate/version"
+require "json"
 
 module Antigate
   require 'net/http'
   require 'uri'
   require 'base64'
 
+	class AntigateError < RuntimeError; end
+	
   def self.wrapper(key)
   	return Wrapper.new(key)
   end
@@ -16,6 +19,8 @@ module Antigate
 
   class Wrapper
   	attr_accessor :phrase, :regsense, :numeric, :calc, :min_len, :max_len, :domain
+
+		URL_V2 = 'https://api.anti-captcha.com/'
 
   	def initialize(key)
   		@key = key
@@ -29,7 +34,47 @@ module Antigate
   		@domain = "antigate.com"
   	end
 
+    # Google Recaptcha
+    # See https://anticaptcha.atlassian.net/wiki/spaces/API/pages/9666606/NoCaptchaTaskProxyless+Google+Recaptcha+puzzle+solving+without+proxies
+		def recognize_recaptcha_proxyless(website_url, website_key)
+			recognize_v2('NoCaptchaTaskProxyless', websiteURL: website_url, websiteKey: website_key)['gRecaptchaResponse']
+		end
+		
+		# Recognize using API v2
+		# https://anticaptcha.atlassian.net/wiki/spaces/API/pages/196635/Documentation+in+English
+		def recognize_v2(task_type, options)
+			data = add_v2({type: task_type}.merge(options))
+			if data['errorId'] === 0
+				task_id = data['taskId']
+				sleep(5)
+				loop do
+					data = get_task_result(task_id)
+					if data['errorId'] === 0
+						if data['status'] === 'processing'
+							sleep(5)
+							next
+						else
+							return data['solution']
+						end
+					else
+						raise AntigateError, data['errorCode']
+					end
+				end
+			else
+				raise AntigateError, data['errorCode']
+			end
+		end
 
+		def add_v2(task_params)
+			params = {clientKey: @key,	task: task_params}
+			post_json('createTask', params)
+		end
+
+		def get_task_result(task_id)
+			post_json('getTaskResult', {clientKey: @key,	taskId: task_id})
+		end
+
+		# Old version
 		# @param url_or_hash
 		# if String, then used as URL of image
 		# if Hash, then url_or_hash[:image] used as image content
@@ -112,5 +157,17 @@ module Antigate
   	def balance
   		return Net::HTTP.get(URI("http://#{@domain}/res.php?key=#{@key}&action=getbalance")) rescue nil
   	end
-  end
+
+		private
+
+		def post_json(path, params)
+			uri = URI("#{URL_V2}/#{path}")
+			req = Net::HTTP::Post.new(uri, 'Content-Type' => 'application/json')
+			req.body = params.to_json
+			res = Net::HTTP.start uri.hostname, uri.port, use_ssl: (uri.scheme == 'https') do |http|
+				http.request(req)
+			end
+			JSON.parse(res.body)
+		end
+	end
 end
